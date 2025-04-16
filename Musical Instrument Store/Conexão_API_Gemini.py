@@ -1,17 +1,21 @@
+import os
 import google.generativeai as genai
+from dotenv import load_dotenv
 
-# Configure a chave da API
-API_KEY = "AIzaSyBGaU16Qnv3O_qHVXq0_u2jk-THkuhlkp0"
+# Carrega as variáveis do .env
+load_dotenv()
+
+# Puxa a chave da API e o nome do modelo do .env
+API_KEY = os.getenv("API_KEY")
+MODEL_NAME = os.getenv("model_name")
+
+# Configura a API do Gemini
 genai.configure(api_key=API_KEY)
 
-# Escolher o melhor modelo disponível
-# Tente "gemini-1.5-pro-latest" se houver erro
-model_name = "gemini-1.5-pro-latest"
+# Cria o modelo com base no nome carregado
+model = genai.GenerativeModel(MODEL_NAME)
 
-# Criar um modelo para teste
-model = genai.GenerativeModel(model_name)
-
-# Testar uma pergunta simples
+# Testa uma pergunta simples
 try:
     response = model.generate_content(
         "Me explique a teoria da relatividade de forma simples.")
