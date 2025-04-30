@@ -2,6 +2,7 @@ import mysql.connector
 import google.generativeai as genai
 import json
 import os
+import time
 from dotenv import load_dotenv
 
 # --- CARREGAR VARIÁVEIS DE AMBIENTE ---
@@ -35,6 +36,22 @@ categoria_exemplo = '''
 }
 '''
 
+
+def gerar_conteudo_com_retry(prompt, tentativas=3):
+    for tentativa in range(tentativas):
+        try:
+            response = model.generate_content(prompt)
+            return response
+        except Exception as e:
+            if "429" in str(e):
+                print("Limite de requisições atingido. Aguardando 60 segundos...")
+                time.sleep(60)
+            else:
+                print(f"Erro inesperado: {e}")
+                raise
+    raise RuntimeError("Número máximo de tentativas excedido.")
+
+
 try:
     # --- CONEXÃO COM O BANCO DE DADOS ---
     conexao = mysql.connector.connect(
@@ -59,10 +76,9 @@ try:
     else:
         print(f"Classificando {len(produtos_sem_categoria)} produtos...")
 
-        # --- MONTAGEM DA LISTA PARA O PROMPT ---
+        # --- PREPARA O PROMPT EM LOTE ---
         lista_produtos = json.dumps(produtos_sem_categoria, ensure_ascii=False)
 
-        # --- PROMPT PARA O GEMINI ---
         prompt = f"""
 A seguir, você verá um JSON com uma lista de produtos musicais, contendo o código e o nome do produto.
 
@@ -87,60 +103,45 @@ JSON com os produtos para classificar:
 {lista_produtos}
 """
 
-        # --- CHAMADA À API GEMINI ---
-        response = model.generate_content(prompt)
+        # --- CHAMADA À API COM TRATAMENTO DE ERRO ---
+        response = gerar_conteudo_com_retry(prompt)
         resultado = response.text.replace(
             "```", "").replace("json", "").strip()
         produtos_classificados = json.loads(resultado)
 
-        # --- ATUALIZAÇÃO NA TABELA CATEGORIA ---
-        update_sql = """
-        UPDATE categoria
-        SET nome_categoria = %s
-        WHERE cod_produto = %s
-        """
+        # --- PREPARAR DADOS PARA ATUALIZAÇÃO EM LOTE ---
+        updates = []
+        ignorados = []
 
         for p in produtos_classificados:
             categoria = p["categoria"]
             codigo = str(p["codigo_produto"])
 
-            # Se a categoria for "Categoria não identificada", tente novamente
-            while categoria == "Categoria não identificada":
+            if categoria != "Categoria não identificada":
+                updates.append((categoria, codigo))
                 print(
-                    f"Produto {codigo} - {p['nome_produto']} -> Categoria não identificada, reclassificando...")
+                    f"Produto {codigo} - {p['nome_produto']} -> Categoria: {categoria}")
+            else:
+                ignorados.append((codigo, p["nome_produto"]))
+                print(
+                    f"Produto {codigo} - {p['nome_produto']} -> Categoria não identificada")
 
-                # Refaça a classificação
-                lista_produtos = json.dumps(
-                    [{"cod_produto": p["codigo_produto"], "nome_produto": p["nome_produto"]}], ensure_ascii=False)
-                prompt = f"""
-A seguir, você verá um produto musical, contendo o código e o nome do produto.
-
-Sua tarefa é classificar o item, com base neste conjunto de categorias já existentes:
-
-{categoria_exemplo}
-
-Retorne a lista com o seguinte formato:
-
-[{{"codigo_produto": "{p['codigo_produto']}", "nome_produto": "{p['nome_produto']}", "categoria": "Categoria identificada"}}]
-
-Caso não pertença a nenhuma categoria, retorne `"categoria": "Categoria não identificada"`.
-                
-JSON com o produto para classificar:
-{lista_produtos}
-"""
-                response = model.generate_content(prompt)
-                resultado = response.text.replace(
-                    "```", "").replace("json", "").strip()
-                p_classificado = json.loads(resultado)[0]
-                categoria = p_classificado["categoria"]
-                print(f"Produto {codigo} - Reclassificado para: {categoria}")
-
-            cursor.execute(update_sql, (categoria, codigo))
+        if updates:
+            update_sql = """
+            UPDATE categoria
+            SET nome_categoria = %s
+            WHERE cod_produto = %s
+            """
+            cursor.executemany(update_sql, updates)
+            conexao.commit()
             print(
-                f"Produto {codigo} - {p['nome_produto']} -> Categoria atualizada: {categoria}")
+                f"\n{len(updates)} produtos atualizados com sucesso no banco de dados!")
 
-        conexao.commit()
-        print("Todos os produtos foram atualizados com sucesso!")
+        if ignorados:
+            print(
+                f"\n{len(ignorados)} produtos não puderam ser classificados:")
+            for cod, nome in ignorados:
+                print(f" - {cod}: {nome}")
 
 except Exception as e:
     print(f"Erro: {e}")
